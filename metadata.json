@@ -1,0 +1,6 @@
+{
+  "name": "Ayumi Asset Shop",
+  "description": "A modern, premium light-themed digital assets marketplace to buy and list UI kits, icons, shaders, and 3D packages.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
