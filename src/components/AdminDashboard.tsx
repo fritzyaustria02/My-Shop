@@ -10,6 +10,7 @@ import { Asset } from '../types';
 interface AdminDashboardProps {
   assets: Asset[];
   token: string;
+  isStaticMode?: boolean;
   onAssetCreated: (asset: Asset) => void;
   onAssetUpdated: (asset: Asset) => void;
   onAssetDeleted: (id: string) => void;
@@ -20,6 +21,7 @@ const CATEGORIES = ["3D Assets", "UI Kits", "Icons", "Audio", "Shaders", "Materi
 export default function AdminDashboard({
   assets,
   token,
+  isStaticMode = false,
   onAssetCreated,
   onAssetUpdated,
   onAssetDeleted
@@ -244,22 +246,33 @@ export default function AdminDashboard({
     };
 
     try {
-      const url = editingAsset ? `/api/assets/${editingAsset.id}` : '/api/assets';
-      const method = editingAsset ? 'PUT' : 'POST';
+      let data: Asset;
+      if (isStaticMode) {
+        const { firebaseClient } = await import('../lib/firebaseClient');
+        if (editingAsset) {
+          data = await firebaseClient.updateAsset(editingAsset.id, assetPayload);
+        } else {
+          data = await firebaseClient.createAsset(assetPayload);
+        }
+      } else {
+        const url = editingAsset ? `/api/assets/${editingAsset.id}` : '/api/assets';
+        const method = editingAsset ? 'PUT' : 'POST';
 
-      const response = await fetch(url, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(assetPayload)
-      });
+        const response = await fetch(url, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify(assetPayload)
+        });
 
-      const data = await response.json();
+        const resJson = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Server rejected administrative asset payload.');
+        if (!response.ok) {
+          throw new Error(resJson.error || 'Server rejected administrative asset payload.');
+        }
+        data = resJson as Asset;
       }
 
       if (editingAsset) {
@@ -290,15 +303,23 @@ export default function AdminDashboard({
 
     setDeleteConfirmId(null);
     try {
-      const response = await fetch(`/api/assets/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      if (isStaticMode) {
+        const { firebaseClient } = await import('../lib/firebaseClient');
+        const success = await firebaseClient.deleteAsset(id);
+        if (!success) {
+          throw new Error('Failed to find and remove asset in Firestore.');
+        }
+      } else {
+        const response = await fetch(`/api/assets/${id}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
 
-      const data = await response.json();
+        const data = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to remove asset.');
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to remove asset.');
+        }
       }
 
       onAssetDeleted(id);

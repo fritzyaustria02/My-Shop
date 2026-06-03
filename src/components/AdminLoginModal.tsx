@@ -5,12 +5,14 @@ import { X, Lock, User, AlertCircle, Loader2 } from 'lucide-react';
 interface AdminLoginModalProps {
   isOpen: boolean;
   onClose: () => void;
+  isStaticMode?: boolean;
   onLoginSuccess: (token: string, username: string) => void;
 }
 
 export default function AdminLoginModal({
   isOpen,
   onClose,
+  isStaticMode = false,
   onLoginSuccess
 }: AdminLoginModalProps) {
   const [username, setUsername] = useState('');
@@ -39,6 +41,19 @@ export default function AdminLoginModal({
     setError(null);
 
     try {
+      if (isStaticMode) {
+        const { firebaseClient, hashPasswordClient } = await import('../lib/firebaseClient');
+        const hashedPassword = await hashPasswordClient(password);
+        const success = await firebaseClient.loginAdmin(username.trim(), hashedPassword);
+        if (success) {
+          onLoginSuccess('static-client-bypass-token', username.trim());
+          onClose();
+        } else {
+          throw new Error('Authentication failed. Please verify credentials.');
+        }
+        return;
+      }
+
       const response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

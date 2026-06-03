@@ -9,6 +9,7 @@ import { Asset } from './types';
 import AssetCard from './components/AssetCard';
 import AdminLoginModal from './components/AdminLoginModal';
 import AdminDashboard from './components/AdminDashboard';
+import { firebaseClient } from './lib/firebaseClient';
 
 const CATEGORIES = ["All", "3D Assets", "UI Kits", "Icons", "Audio", "Shaders", "Materials", "Templates"];
 
@@ -17,6 +18,7 @@ export default function App() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [isStaticMode, setIsStaticMode] = useState(false);
 
   // Filter queries
   const [searchQuery, setSearchQuery] = useState('');
@@ -49,6 +51,34 @@ export default function App() {
     }
   });
 
+  // Check if we are running in static web hosting or the backend server is dead/unreachable
+  useEffect(() => {
+    const checkHostingMode = async () => {
+      const hostname = window.location.hostname;
+      const isStaticHost = hostname.includes('github.io') || 
+                           hostname.includes('netlify.app') || 
+                           hostname.includes('vercel.app');
+                           
+      if (isStaticHost) {
+        setIsStaticMode(true);
+        console.warn('Ayumi: Running on static host. Bypassing Express server, communicating with Firestore directly.');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/health');
+        if (!res.ok) {
+          setIsStaticMode(true);
+          console.warn('Ayumi: Express API server unhealthy. Direct Firestore client fallback activated.');
+        }
+      } catch (e) {
+        setIsStaticMode(true);
+        console.warn('Ayumi: Express API server unreachable. Direct Firestore client fallback activated.', e);
+      }
+    };
+    checkHostingMode();
+  }, []);
+
   // Hydrate admin session token from LocalStorage
   useEffect(() => {
     const storedToken = localStorage.getItem('admin_token');
@@ -57,8 +87,11 @@ export default function App() {
       setAdminToken(storedToken);
       setAdminUser(storedUser);
     }
-    fetchAssets();
   }, []);
+
+  useEffect(() => {
+    fetchAssets();
+  }, [isStaticMode]);
 
   const trackClick = async (assetId: string) => {
     if (!assetId || assetId === 'undefined' || assetId === 'null') {
@@ -66,6 +99,12 @@ export default function App() {
       return;
     }
     try {
+      if (isStaticMode) {
+        const clicks = await firebaseClient.recordClick(assetId);
+        setAssets(prev => prev.map(a => a.id === assetId ? { ...a, clicks } : a));
+        setSelectedAssetForView(prev => prev && prev.id === assetId ? { ...prev, clicks } : prev);
+        return;
+      }
       const res = await fetch(`/api/assets/${assetId}/click`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
@@ -83,6 +122,12 @@ export default function App() {
       return;
     }
     try {
+      if (isStaticMode) {
+        const downloads = await firebaseClient.recordDownload(assetId);
+        setAssets(prev => prev.map(a => a.id === assetId ? { ...a, downloads } : a));
+        setSelectedAssetForView(prev => prev && prev.id === assetId ? { ...prev, downloads } : prev);
+        return;
+      }
       const res = await fetch(`/api/assets/${assetId}/download`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
@@ -103,27 +148,36 @@ export default function App() {
     const action = isCurrentlyFavorited ? 'decrement' : 'increment';
     
     try {
-      const res = await fetch(`/api/assets/${assetId}/favorite`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        let updatedFavs: string[];
-        if (isCurrentlyFavorited) {
-          updatedFavs = favoritedIds.filter(id => id !== assetId);
+      let favoritesCount: number;
+      if (isStaticMode) {
+        favoritesCount = await firebaseClient.toggleFavorite(assetId, action);
+      } else {
+        const res = await fetch(`/api/assets/${assetId}/favorite`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          favoritesCount = data.favorites;
         } else {
-          updatedFavs = [...favoritedIds, assetId];
+          throw new Error('Failed to toggle favorite.');
         }
-        setFavoritedIds(updatedFavs);
-        localStorage.setItem('ayumi_favorites', JSON.stringify(updatedFavs));
-
-        setAssets(prev => prev.map(a => a.id === assetId ? { ...a, favorites: data.favorites } : a));
-        
-        // Also update details panel active instance
-        setSelectedAssetForView(prev => prev && prev.id === assetId ? { ...prev, favorites: data.favorites } : prev);
       }
+
+      let updatedFavs: string[];
+      if (isCurrentlyFavorited) {
+        updatedFavs = favoritedIds.filter(id => id !== assetId);
+      } else {
+        updatedFavs = [...favoritedIds, assetId];
+      }
+      setFavoritedIds(updatedFavs);
+      localStorage.setItem('ayumi_favorites', JSON.stringify(updatedFavs));
+
+      setAssets(prev => prev.map(a => a.id === assetId ? { ...a, favorites: favoritesCount } : a));
+      
+      // Also update details panel active instance
+      setSelectedAssetForView(prev => prev && prev.id === assetId ? { ...prev, favorites: favoritesCount } : prev);
     } catch (err) {
       console.error('Failed to toggle favorite:', err);
     }
@@ -133,6 +187,11 @@ export default function App() {
     setIsLoading(true);
     setFetchError(null);
     try {
+      if (isStaticMode) {
+        const data = await firebaseClient.getAssets();
+        setAssets(data);
+        return;
+      }
       const response = await fetch('/api/assets');
       if (!response.ok) {
         throw new Error('Failed to fetch asset catalog from server.');
@@ -140,7 +199,15 @@ export default function App() {
       const data = await response.json();
       setAssets(data);
     } catch (err: any) {
-      setFetchError(err.message || 'Error communicating with full-stack endpoints.');
+      // Dynamic fallback
+      try {
+        console.warn('Vite proxy backend missing, falling back to direct Client SDK...', err);
+        const data = await firebaseClient.getAssets();
+        setAssets(data);
+        setIsStaticMode(true);
+      } catch (fallbackErr: any) {
+        setFetchError(err.message || 'Error communicating with full-stack endpoints.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -426,6 +493,7 @@ export default function App() {
               <AdminDashboard
                 assets={assets}
                 token={adminToken}
+                isStaticMode={isStaticMode}
                 onAssetCreated={handleAssetCreated}
                 onAssetUpdated={handleAssetUpdated}
                 onAssetDeleted={handleAssetDeleted}
@@ -607,7 +675,7 @@ export default function App() {
               © {new Date().getFullYear()} AYUMI ASSET SHOP. ALL INTELLECTUAL ASSETS SECURED.
             </p>
             <p className="text-[10px] text-slate-400 mt-0.5">
-              Powered by Node.js, Express server, and localized persistence. Beautifully rendered in White theme.
+              Powered by Firestore DB and optimized asset pipelines. Connection: {isStaticMode ? '🔌 Direct Firebase SDK' : '🧬 Server API Proxy'}.
             </p>
           </div>
           <div className="flex items-center gap-4 text-xs text-slate-400">
@@ -625,6 +693,7 @@ export default function App() {
       <AdminLoginModal
         isOpen={isLoginOpen}
         onClose={() => setIsLoginOpen(false)}
+        isStaticMode={isStaticMode}
         onLoginSuccess={handleLoginSuccess}
       />
 
