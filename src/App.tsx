@@ -61,6 +61,10 @@ export default function App() {
   }, []);
 
   const trackClick = async (assetId: string) => {
+    if (!assetId || assetId === 'undefined' || assetId === 'null') {
+      console.warn('Skipping trackClick: assetId is invalid or undefined');
+      return;
+    }
     try {
       const res = await fetch(`/api/assets/${assetId}/click`, { method: 'POST' });
       if (res.ok) {
@@ -74,6 +78,10 @@ export default function App() {
   };
 
   const trackDownload = async (assetId: string) => {
+    if (!assetId || assetId === 'undefined' || assetId === 'null') {
+      console.warn('Skipping trackDownload: assetId is invalid or undefined');
+      return;
+    }
     try {
       const res = await fetch(`/api/assets/${assetId}/download`, { method: 'POST' });
       if (res.ok) {
@@ -87,6 +95,10 @@ export default function App() {
   };
 
   const handleToggleFavorite = async (assetId: string) => {
+    if (!assetId || assetId === 'undefined' || assetId === 'null') {
+      console.warn('Skipping handleToggleFavorite: assetId is invalid or undefined');
+      return;
+    }
     const isCurrentlyFavorited = favoritedIds.includes(assetId);
     const action = isCurrentlyFavorited ? 'decrement' : 'increment';
     

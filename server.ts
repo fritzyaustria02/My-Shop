@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import jwt from 'jsonwebtoken';
 import { createServer as createViteServer } from 'vite';
 import { Database, hashPassword } from './src/server/db';
@@ -113,6 +114,9 @@ app.post('/api/assets', authenticateAdmin, async (req, res) => {
 // 5. Admin Only: Modify Digital Asset
 app.put('/api/assets/:id', authenticateAdmin, async (req, res) => {
   const { id } = req.params;
+  if (!id || id === 'undefined' || id === 'null') {
+    return res.status(400).json({ error: 'Asset ID is invalid, null or undefined' });
+  }
   const { name, description, price, imageUrl, category, tags, purchaseLink, downloadUrl, downloadFileName } = req.body;
 
   try {
@@ -143,6 +147,9 @@ app.put('/api/assets/:id', authenticateAdmin, async (req, res) => {
 // 6. Admin Only: Expunge Digital Asset
 app.delete('/api/assets/:id', authenticateAdmin, async (req, res) => {
   const { id } = req.params;
+  if (!id || id === 'undefined' || id === 'null') {
+    return res.status(400).json({ error: 'Asset ID is invalid, null or undefined' });
+  }
 
   try {
     const deleted = await Database.deleteAsset(id);
@@ -159,6 +166,9 @@ app.delete('/api/assets/:id', authenticateAdmin, async (req, res) => {
 // 7. Public/Guest: Increment Click KPI tracker
 app.post('/api/assets/:id/click', async (req, res) => {
   const { id } = req.params;
+  if (!id || id === 'undefined' || id === 'null') {
+    return res.status(400).json({ error: 'Asset ID is invalid, null or undefined' });
+  }
   try {
     const updatedAsset = await Database.recordClick(id);
     res.json({ success: true, id: updatedAsset.id, clicks: updatedAsset.clicks || 0 });
@@ -170,6 +180,9 @@ app.post('/api/assets/:id/click', async (req, res) => {
 // 8. Public/Guest: Increment Download KPI tracker for free assets
 app.post('/api/assets/:id/download', async (req, res) => {
   const { id } = req.params;
+  if (!id || id === 'undefined' || id === 'null') {
+    return res.status(400).json({ error: 'Asset ID is invalid, null or undefined' });
+  }
   try {
     const updatedAsset = await Database.recordDownload(id);
     res.json({ success: true, id: updatedAsset.id, downloads: updatedAsset.downloads || 0 });
@@ -181,6 +194,9 @@ app.post('/api/assets/:id/download', async (req, res) => {
 // 9. Public/Guest: Toggle asset favorite
 app.post('/api/assets/:id/favorite', async (req, res) => {
   const { id } = req.params;
+  if (!id || id === 'undefined' || id === 'null') {
+    return res.status(400).json({ error: 'Asset ID is invalid, null or undefined' });
+  }
   const { action } = req.body; // 'increment' | 'decrement'
   try {
     const updatedAsset = await Database.toggleFavorite(id, action || 'increment');
@@ -193,17 +209,22 @@ app.post('/api/assets/:id/favorite', async (req, res) => {
 // ======================== FULL-STACK CLIENT PLATFORM MODULE ========================
 
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  const distPath = path.join(process.cwd(), 'dist');
+  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+  
+  // Decide whether to run development Vite middleware or serve production assets
+  const isProduction = process.env.NODE_ENV === 'production' || (!process.env.DISABLE_HMR && hasDist);
+
+  if (!isProduction) {
     // Mount Vite middleware in development mode
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-    console.log('â Vite developer asset integration server loaded');
+    console.log('⚡ Vite developer asset integration server loaded');
   } else {
     // Serve build outputs in production
-    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

@@ -88,8 +88,59 @@ export default function AdminDashboard({
     setSuccessMsg(null);
   };
 
-  // Handle local image uploads via FileReader
-  const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
+  // Helper to dynamically downscale and compress local uploads using HTML5 Canvas
+  // This maintains extremely small image storage sizes (<100KB) to prevent exceeding Firestore's 1MB document limit.
+  const compressImageFile = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const MAX_WIDTH = 800;
+          const MAX_HEIGHT = 600;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height = Math.round((height * MAX_WIDTH) / width);
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width = Math.round((width * MAX_HEIGHT) / height);
+              height = MAX_HEIGHT;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(event.target?.result as string);
+            return;
+          }
+
+          ctx.drawImage(img, 0, 0, width, height);
+          // Compress output to JPEG at 0.65 quality (excellent clarity at 10% footprint)
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.65);
+          resolve(dataUrl);
+        };
+        img.onerror = () => {
+          reject(new Error('Unsupported or corrupted image file format.'));
+        };
+        img.src = event.target?.result as string;
+      };
+      reader.onerror = () => {
+        reject(new Error('Failed to read the local image.'));
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // Handle local image uploads via FileReader with auto-compression
+  const handleImageUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -98,24 +149,23 @@ export default function AdminDashboard({
       return;
     }
 
-    // Check size limit: keep under 5MB to prevent memory bloat in local DB files
-    if (file.size > 5 * 1024 * 1024) {
-      setError('File is too large. Choose an image under 5MB.');
+    // Limit original image file to 10MB to prevent browser tab freeze during load/render
+    if (file.size > 10 * 1024 * 1024) {
+      setError('Selected image is too large. Please select an image under 10MB.');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setImageUrl(reader.result);
-        setImagePreview(reader.result);
-        setError(null);
-      }
-    };
-    reader.onerror = () => {
-      setError('Failed to process uploaded file.');
-    };
-    reader.readAsDataURL(file);
+    try {
+      setError(null);
+      setSuccessMsg('Optimizing image for database storage...');
+      const compressedUrl = await compressImageFile(file);
+      setImageUrl(compressedUrl);
+      setImagePreview(compressedUrl);
+      setSuccessMsg('Image optimized and loaded successfully!');
+    } catch (err: any) {
+      setError(err.message || 'Failed to compress image.');
+      setSuccessMsg(null);
+    }
   };
 
   // Handle local generic files (e.g. models, shaders, scripts)
@@ -123,9 +173,9 @@ export default function AdminDashboard({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Check size limit: 12MB limit in client payload to prevent memory overflow in db.json
-    if (file.size > 12 * 1024 * 1024) {
-      setError('Generic package file is too large. Keep it under 12MB.');
+    // Strict size limit: 650KB limit to keep entire Firestore document structure under 1MB
+    if (file.size > 650 * 1024) {
+      setError('Direct file upload halted: Direct file storage is limited to 650KB due to database space constraints. For larger assets, please specify an external direct download link (e.g., Google Drive, Dropbox, GitHub) in the url input above instead of uploading directly.');
       return;
     }
 

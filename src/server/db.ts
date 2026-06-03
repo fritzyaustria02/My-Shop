@@ -1,6 +1,16 @@
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  doc, 
+  getDoc, 
+  getDocs, 
+  collection, 
+  setDoc, 
+  deleteDoc 
+} from 'firebase/firestore';
 import { Asset } from '../types';
 
 // Password hashing helper using Node's standard crypto module
@@ -14,16 +24,49 @@ export interface AdminAccount {
   passwordHash: string;
 }
 
-export interface DbSchema {
-  assets: Asset[];
-  admins: AdminAccount[];
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
 }
 
-const DB_DIR = path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DB_DIR, 'marketplace-db.json');
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
 
-// SHA-256 hash of 'password123'
-const DEFAULT_ADMIN_HASH = hashPassword('password123');
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: 'server-client-role',
+      email: null,
+      emailVerified: null,
+      isAnonymous: false,
+      tenantId: null,
+      providerInfo: []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 const INITIAL_ASSETS: Asset[] = [
   {
@@ -79,166 +122,264 @@ const INITIAL_ASSETS: Asset[] = [
 ];
 
 export class Database {
-  private static schema: DbSchema | null = null;
+  private static db: any = null;
+  private static isInitialized = false;
 
-  // Initialize DB directory and file if it does not exist
   private static async init(): Promise<void> {
-    if (this.schema) return;
+    if (this.isInitialized) return;
 
     try {
-      await fs.mkdir(DB_DIR, { recursive: true });
-    } catch (e) {
-      // Ignore directory exists errors
-    }
-
-    try {
-      const data = await fs.readFile(DB_FILE, 'utf-8');
-      this.schema = JSON.parse(data);
+      const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
+      const firebaseConfig = JSON.parse(await fs.readFile(configPath, 'utf8'));
       
-      // Safety: always ensure 'Ayumi' admin is registered in existing database
-      if (this.schema && Array.isArray(this.schema.admins)) {
-        const hasAyumi = this.schema.admins.some(a => a.username.toLowerCase() === 'ayumi');
-        if (!hasAyumi) {
-          this.schema.admins.push({
-            id: 'admin-2',
-            username: 'Ayumi',
-            passwordHash: hashPassword('AyumiAdmin098')
-          });
-          await this.save();
-        }
+      const app = initializeApp(firebaseConfig);
+      this.db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+      // Validate Connection to Firestore (Skill Requirement)
+      try {
+        await getDoc(doc(this.db, 'test/connection'));
+      } catch (err) {
+        console.warn('Firebase server connection check bypass/fallback:', err);
       }
-    } catch (error) {
-      // Create fresh file if read fails (e.g. file doesn't exist)
-      this.schema = {
-        assets: INITIAL_ASSETS,
-        admins: [
-          {
-            id: 'admin-1',
-            username: 'admin',
-            passwordHash: DEFAULT_ADMIN_HASH
-          },
-          {
-            id: 'admin-2',
-            username: 'Ayumi',
-            passwordHash: hashPassword('AyumiAdmin098')
-          }
-        ]
-      };
-      await this.save();
+
+      // Bootstrap databases
+      await this.bootstrapAdmins();
+      await this.bootstrapAssets();
+
+      this.isInitialized = true;
+    } catch (e: any) {
+      console.error('Failed to initialize Firestore database:', e);
+      throw e;
     }
   }
 
-  private static async save(): Promise<void> {
-    if (!this.schema) return;
-    await fs.writeFile(DB_FILE, JSON.stringify(this.schema, null, 2), 'utf-8');
+  private static async bootstrapAdmins(): Promise<void> {
+    const adminRef1 = doc(this.db, 'admins', 'admin-1');
+    const adminRef2 = doc(this.db, 'admins', 'admin-2');
+    
+    try {
+      const snap1 = await getDoc(adminRef1);
+      if (!snap1.exists()) {
+        await setDoc(adminRef1, {
+          id: 'admin-1',
+          username: 'admin',
+          passwordHash: hashPassword('password123')
+        });
+      }
+      
+      const snap2 = await getDoc(adminRef2);
+      if (!snap2.exists()) {
+        await setDoc(adminRef2, {
+          id: 'admin-2',
+          username: 'Ayumi',
+          passwordHash: hashPassword('AyumiAdmin098')
+        });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'admins');
+    }
+  }
+
+  private static async bootstrapAssets(): Promise<void> {
+    const assetsCol = collection(this.db, 'assets');
+    try {
+      const assetsSnap = await getDocs(assetsCol);
+      if (assetsSnap.empty) {
+        for (const asset of INITIAL_ASSETS) {
+          await setDoc(doc(this.db, 'assets', asset.id), asset);
+        }
+        console.log('Successfully bootstrapped initial assets to Firestore.');
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'assets');
+    }
   }
 
   public static async getAssets(): Promise<Asset[]> {
     await this.init();
-    return this.schema ? this.schema.assets : [];
+    const assetsCol = collection(this.db, 'assets');
+    try {
+      const querySnap = await getDocs(assetsCol);
+      const list: Asset[] = [];
+      querySnap.forEach((docSnap: any) => {
+        const data = docSnap.data() as Asset;
+        if (data) {
+          list.push({
+            ...data,
+            id: data.id || docSnap.id,
+            name: data.name || 'Unnamed Asset',
+            price: typeof data.price === 'number' ? data.price : 0,
+            imageUrl: data.imageUrl || '',
+            category: data.category || 'Templates',
+            createdAt: data.createdAt || new Date().toISOString()
+          });
+        }
+      });
+      return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'assets');
+      return [];
+    }
   }
 
   public static async addAsset(asset: Omit<Asset, 'id' | 'createdAt'>): Promise<Asset> {
     await this.init();
-    if (!this.schema) throw new Error('DB not initialized');
-
+    const id = `asset-${crypto.randomBytes(6).toString('hex')}`;
+    const createdAt = new Date().toISOString();
+    
     const newAsset: Asset = {
       ...asset,
-      id: `asset-${crypto.randomBytes(6).toString('hex')}`,
-      createdAt: new Date().toISOString()
+      id,
+      createdAt,
+      clicks: 0,
+      downloads: 0,
+      favorites: 0
     };
 
-    this.schema.assets.unshift(newAsset); // Add to beginning of the list
-    await this.save();
-    return newAsset;
+    try {
+      await setDoc(doc(this.db, 'assets', id), newAsset);
+      return newAsset;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `assets/${id}`);
+      throw error;
+    }
   }
 
   public static async updateAsset(id: string, updatedFields: Partial<Asset>): Promise<Asset> {
     await this.init();
-    if (!this.schema) throw new Error('DB not initialized');
-
-    const index = this.schema.assets.findIndex(a => a.id === id);
-    if (index === -1) throw new Error(`Asset with id ${id} not found`);
-
-    const currentAsset = this.schema.assets[index];
-    const updatedAsset: Asset = {
-      ...currentAsset,
-      ...updatedFields,
-      id, // Protect ID overriding
-      createdAt: currentAsset.createdAt // Safeguard original creation time
-    };
-
-    this.schema.assets[index] = updatedAsset;
-    await this.save();
-    return updatedAsset;
+    if (!id || id === 'undefined' || id === 'null') {
+      throw new Error('Invalid, null or undefined asset ID provided to updateAsset');
+    }
+    const assetRef = doc(this.db, 'assets', id);
+    try {
+      const docSnap = await getDoc(assetRef);
+      if (!docSnap.exists()) {
+        throw new Error(`Asset with id ${id} not found`);
+      }
+      const currentAsset = docSnap.data() as Asset;
+      const updatedAsset: Asset = {
+        ...currentAsset,
+        ...updatedFields,
+        id,
+        createdAt: currentAsset.createdAt
+      };
+      await setDoc(assetRef, updatedAsset);
+      return updatedAsset;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `assets/${id}`);
+      throw error;
+    }
   }
 
   public static async recordClick(id: string): Promise<Asset> {
     await this.init();
-    if (!this.schema) throw new Error('DB not initialized');
-    const index = this.schema.assets.findIndex(a => a.id === id);
-    if (index === -1) throw new Error(`Asset with id ${id} not found`);
-    const currentAsset = this.schema.assets[index];
-    const updatedAsset: Asset = {
-      ...currentAsset,
-      clicks: (currentAsset.clicks || 0) + 1
-    };
-    this.schema.assets[index] = updatedAsset;
-    await this.save();
-    return updatedAsset;
+    if (!id || id === 'undefined' || id === 'null') {
+      throw new Error('Invalid, null or undefined asset ID provided to recordClick');
+    }
+    const assetRef = doc(this.db, 'assets', id);
+    try {
+      const docSnap = await getDoc(assetRef);
+      if (!docSnap.exists()) {
+        throw new Error(`Asset with id ${id} not found`);
+      }
+      const currentAsset = docSnap.data() as Asset;
+      const updatedAsset: Asset = {
+        ...currentAsset,
+        clicks: (currentAsset.clicks || 0) + 1
+      };
+      await setDoc(assetRef, updatedAsset);
+      return updatedAsset;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `assets/${id}`);
+      throw error;
+    }
   }
 
   public static async recordDownload(id: string): Promise<Asset> {
     await this.init();
-    if (!this.schema) throw new Error('DB not initialized');
-    const index = this.schema.assets.findIndex(a => a.id === id);
-    if (index === -1) throw new Error(`Asset with id ${id} not found`);
-    const currentAsset = this.schema.assets[index];
-    const updatedAsset: Asset = {
-      ...currentAsset,
-      downloads: (currentAsset.downloads || 0) + 1
-    };
-    this.schema.assets[index] = updatedAsset;
-    await this.save();
-    return updatedAsset;
+    if (!id || id === 'undefined' || id === 'null') {
+      throw new Error('Invalid, null or undefined asset ID provided to recordDownload');
+    }
+    const assetRef = doc(this.db, 'assets', id);
+    try {
+      const docSnap = await getDoc(assetRef);
+      if (!docSnap.exists()) {
+        throw new Error(`Asset with id ${id} not found`);
+      }
+      const currentAsset = docSnap.data() as Asset;
+      const updatedAsset: Asset = {
+        ...currentAsset,
+        downloads: (currentAsset.downloads || 0) + 1
+      };
+      await setDoc(assetRef, updatedAsset);
+      return updatedAsset;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `assets/${id}`);
+      throw error;
+    }
   }
 
   public static async toggleFavorite(id: string, action: 'increment' | 'decrement'): Promise<Asset> {
     await this.init();
-    if (!this.schema) throw new Error('DB not initialized');
-    const index = this.schema.assets.findIndex(a => a.id === id);
-    if (index === -1) throw new Error(`Asset with id ${id} not found`);
-    const currentAsset = this.schema.assets[index];
-    const currentFavs = currentAsset.favorites || 0;
-    const nextFavs = action === 'increment' ? currentFavs + 1 : Math.max(0, currentFavs - 1);
-    const updatedAsset: Asset = {
-      ...currentAsset,
-      favorites: nextFavs
-    };
-    this.schema.assets[index] = updatedAsset;
-    await this.save();
-    return updatedAsset;
+    if (!id || id === 'undefined' || id === 'null') {
+      throw new Error('Invalid, null or undefined asset ID provided to toggleFavorite');
+    }
+    const assetRef = doc(this.db, 'assets', id);
+    try {
+      const docSnap = await getDoc(assetRef);
+      if (!docSnap.exists()) {
+        throw new Error(`Asset with id ${id} not found`);
+      }
+      const currentAsset = docSnap.data() as Asset;
+      const currentFavs = currentAsset.favorites || 0;
+      const nextFavs = action === 'increment' ? currentFavs + 1 : Math.max(0, currentFavs - 1);
+      const updatedAsset: Asset = {
+        ...currentAsset,
+        favorites: nextFavs
+      };
+      await setDoc(assetRef, updatedAsset);
+      return updatedAsset;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `assets/${id}`);
+      throw error;
+    }
   }
 
   public static async deleteAsset(id: string): Promise<boolean> {
     await this.init();
-    if (!this.schema) throw new Error('DB not initialized');
-
-    const originalLength = this.schema.assets.length;
-    this.schema.assets = this.schema.assets.filter(a => a.id !== id);
-    
-    if (this.schema.assets.length < originalLength) {
-      await this.save();
-      return true;
+    if (!id || id === 'undefined' || id === 'null') {
+      throw new Error('Invalid, null or undefined asset ID provided to deleteAsset');
     }
-    return false;
+    const assetRef = doc(this.db, 'assets', id);
+    try {
+      const docSnap = await getDoc(assetRef);
+      if (!docSnap.exists()) {
+        return false;
+      }
+      await deleteDoc(assetRef);
+      return true;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `assets/${id}`);
+      throw error;
+    }
   }
 
   public static async getAdminByUsername(username: string): Promise<AdminAccount | null> {
     await this.init();
-    if (!this.schema) return null;
-
-    const admin = this.schema.admins.find(a => a.username.toLowerCase() === username.toLowerCase());
-    return admin || null;
+    try {
+      const adminsCol = collection(this.db, 'admins');
+      const querySnap = await getDocs(adminsCol);
+      let matchAdmin: AdminAccount | null = null;
+      querySnap.forEach((docSnap: any) => {
+        const ad = docSnap.data() as AdminAccount;
+        if (ad.username.toLowerCase() === username.toLowerCase()) {
+          matchAdmin = ad;
+        }
+      });
+      return matchAdmin;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, 'admins');
+      return null;
+    }
   }
 }

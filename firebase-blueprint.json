@@ -1,0 +1,47 @@
+{
+  "entities": {
+    "Asset": {
+      "title": "Asset",
+      "description": "A digital asset for sale or download",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "price": { "type": "number" },
+        "imageUrl": { "type": "string" },
+        "category": { "type": "string" },
+        "tags": { "type": "array" },
+        "purchaseLink": { "type": "string" },
+        "downloadUrl": { "type": "string" },
+        "downloadFileName": { "type": "string" },
+        "clicks": { "type": "number" },
+        "downloads": { "type": "number" },
+        "favorites": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "description", "price", "imageUrl", "category", "createdAt"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "An admin account credential record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "passwordHash": { "type": "string" }
+      },
+      "required": ["id", "username", "passwordHash"]
+    }
+  },
+  "firestore": {
+    "/assets/{assetId}": {
+      "schema": "Asset",
+      "description": "Collection of digital asset and pack details"
+    },
+    "/admins/{adminId}": {
+      "schema": "Admin",
+      "description": "Collection of admin accounts"
+    }
+  }
+}
